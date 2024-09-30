@@ -1,191 +1,199 @@
+# from fastapi import FastAPI, HTTPException
+# from pydantic import BaseModel
+# from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+# from langchain_community.document_loaders import PyPDFLoader
+# from langchain.text_splitter import RecursiveCharacterTextSplitter
+# from langchain_qdrant import QdrantVectorStore
+# import requests
+
+# app = FastAPI()
+
+# # Initialize the embedding model and Gemini summarization model
+# embeddings = GoogleGenerativeAIEmbeddings(
+#     model="models/embedding-001",
+#     google_api_key="AIzaSyB2J3yWoGz_UhMoDQDmOulaWzzSO1h9kZo"
+# )
+
+# Gemini = ChatGoogleGenerativeAI(
+#     model="gemini-1.5-pro",
+#     api_key="AIzaSyB2J3yWoGz_UhMoDQDmOulaWzzSO1h9kZo",
+#     temperature=0,
+#     max_tokens=250,
+#     timeout=None,
+#     max_retries=2,
+# )
+
+# # Load and prepare the document dataset (this should be done once during app startup)
+# pdf_path = r"D:\Mission\PIAIC\Quarter 4\projects\Multi_DOC_rag\transformer.pdf"
+# Dataset_transformer = PyPDFLoader(pdf_path)
+# pages = Dataset_transformer.load()
+# pdf_text = " ".join(page.page_content for page in pages)
+
+# text_splitter = RecursiveCharacterTextSplitter(
+#     chunk_size=1000,
+#     chunk_overlap=200,
+#     separators=["\n\n", ".", " "]
+# )
+# texts = text_splitter.create_documents([pdf_text])
+
+# # Configure the Qdrant vector store
+# url = "https://2c198102-ae27-482e-8f0c-7e7aac93309d.europe-west3-0.gcp.cloud.qdrant.io:6333"
+# api_key = "MJ4SW_YT6rAEGSMffQjYO17rth77dmR_l4wq2CjehmrF9v6S9MPbLQ"
+
+# # Check Qdrant connectivity and initialize the vector store
+# response = requests.get(f"{url}/collections", headers={"api-key": api_key})
+# if response.status_code != 200:
+#     raise Exception(f"Failed to connect to Qdrant: {response.status_code} - {response.text}")
+
+# qdrant = QdrantVectorStore.from_documents(
+#     texts,
+#     embeddings,
+#     url=url,
+#     api_key=api_key,
+#     collection_name="Multi_rag_app",
+# )
+
+
+# # Define the request model for querying the API
+# class QueryRequest(BaseModel):
+#     question: str
+
+
+# @app.post("/search")
+# async def search_and_summarize(request: QueryRequest):
+#     """
+#     Search for documents based on a question and summarize the results.
+#     """
+#     question = request.question
+#     docs_ss = qdrant.similarity_search(question, k=5)
+
+#     if not docs_ss:
+#         raise HTTPException(status_code=404, detail="No similar documents found.")
+    
+#     # Aggregate content from the top results
+#     aggregated_content = " ".join([doc.page_content for doc in docs_ss])
+
+#     # Use the Gemini model to summarize the content
+#     messages = [
+#         ("system", "You are a helpful assistant."),
+#         ("human", f"Summarize this content: {aggregated_content[:1500]}")  # Limit content length for summarization
+#     ]
+    
+#     # Summarize the aggregated content
+#     ai_msg = Gemini.invoke(messages)
+
+#     return {"summary": ai_msg.content}
+
+
+# # To run the FastAPI application, save this as `main.py` and run:
+# # uvicorn main:app --reload
+
+
+
+# ==========================================================================
+
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import os
-from dotenv import load_dotenv
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_qdrant import QdrantVectorStore
+from fastapi.responses import StreamingResponse
 import requests
-from langchain.agents import AgentExecutor
-from langchain.agents import create_tool_calling_agent
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.tools import Tool
-from langchain.prompts import PromptTemplate
-import uvicorn
+import asyncio
+import time
+from typing import AsyncGenerator
 
-# Load environment variables
-load_dotenv()
-
-# API keys
-PUBMED_API_KEY = os.getenv("NCBI_API_KEY")
-FDA_API_KEY = os.getenv("FDA_API_KEY")
-
-# Initialize FastAPI app
 app = FastAPI()
 
-# Initialize the LLM with GoogleGenerativeAI
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+# Initialize the embedding model and Gemini summarization model
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
     google_api_key="AIzaSyB2J3yWoGz_UhMoDQDmOulaWzzSO1h9kZo"
-    # google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# Function to query PubMed for symptoms and treatment options
-def fetch_pubmed_articles(search_term: str) -> str:
-    """Fetches articles from PubMed based on the provided search term."""
-    PUBMED_API_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    PUBMED_SUMMARY_API_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    params = {
-        'db': 'pubmed',
-        'term': search_term,
-        'retmax': 5,
-        'retmode': 'json',
-        'api_key': PUBMED_API_KEY
-    }
-
-    try:
-        # Search PubMed
-        response = requests.get(PUBMED_API_URL, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            id_list = data.get("esearchresult", {}).get("idlist", [])
-            if not id_list:
-                return "No articles found for this search term."
-            
-            # Fetch summaries for the retrieved articles
-            summary_params = {
-                'db': 'pubmed',
-                'id': ','.join(id_list),
-                'retmode': 'json',
-                'api_key': PUBMED_API_KEY
-            }
-            summary_response = requests.get(PUBMED_SUMMARY_API_URL, params=summary_params)
-            if summary_response.status_code == 200:
-                summary_data = summary_response.json()
-                articles = summary_data.get("result", {})
-                detailed_responses = []
-                for article_id in id_list:
-                    article = articles.get(article_id, {})
-                    title = article.get("title", "No title available")
-                    pub_year = article.get("pubdate", "No publication date available")
-                    detailed_responses.append(f"Title: {title}, Published: {pub_year}")
-                return " | ".join(detailed_responses)
-            else:
-                return f"Error: Unable to fetch article summaries. Status code {summary_response.status_code}."
-        else:
-            return f"Error: Unable to fetch PubMed articles. Status code {response.status_code}."
-    except Exception as e:
-        return f"Error fetching PubMed articles: {str(e)}"
-
-# Function to fetch drug side effects from the FDA API
-import requests
-
-def fetch_drug_side_effects(drug_name: str) -> str:
-    """Fetches drug side effects from the FDA API using event data."""
-    FDA_API_URL = f"https://api.fda.gov/drug/event.json?search=patient.drug.medicinalproduct:{drug_name}&limit=1"
-    try:
-        response = requests.get(FDA_API_URL)
-        if response.status_code == 200:
-            data = response.json()
-            if 'results' in data and len(data['results']) > 0:
-                side_effects = data['results'][0].get('patient', {}).get('reaction', [])
-                if side_effects:
-                    # Collect all the side effects descriptions
-                    side_effect_descriptions = [reaction.get('reactionmeddrapt', 'No description') for reaction in side_effects]
-                    return ", ".join(side_effect_descriptions)
-                else:
-                    return "No side effects listed for this drug."
-            else:
-                    return "No information available for this drug."
-        else:
-            return f"Error: {response.status_code} - Unable to fetch data from FDA API"
-    except Exception as e:
-        return f"Error fetching drug information: {str(e)}"
-
-
-
-# Wrap the functions into Langchain tools
-pubmed_search_tool = Tool(
-    name="fetch_pubmed_articles",
-    func=fetch_pubmed_articles,
-    description=(
-        "This tool fetches research articles from PubMed focused on symptoms, causes of diseases, or treatment options. "
-        "Input should be a search term related to a disease or condition followed by the specific query type (e.g., 'fever causes', 'diabetes symptoms', or 'cancer treatment'). "
-        "For questions about the causes of diseases, this tool retrieves articles specifically discussing the underlying causes of the disease. "
-       "It also provides detailed summaries from PubMed based on the input query, which may cover symptoms, causes, and treatments."
-       "If a user asks a complex or partially irrelevant query (e.g., mixing non-medical topics with a question about symptoms or treatments), this tool ensures that the agent only processes the relevant medical parts of the query and retrieves accurate information from PubMed."
-    )
+Gemini = ChatGoogleGenerativeAI(
+    model="gemini-1.5-pro",
+    api_key="AIzaSyB2J3yWoGz_UhMoDQDmOulaWzzSO1h9kZo",
+    temperature=0,
+    max_tokens=250,
+    timeout=None,
+    max_retries=2,
 )
 
-fda_side_effects_tool = Tool(
-    name="fetch_drug_side_effects",
-    func=fetch_drug_side_effects,
-    description=(
-           "This tool fetches detailed side effects of a drug from the FDA API. "
-        "Input should be the drug name (e.g., 'paracetamol', 'aspirin'). "
-        "If the user asks a complex or irrelevant question but ultimately seeks information about the side effects of a drug (e.g., mixing unrelated topics with the query 'side effects of paracetamol'), this tool will focus only on the relevant drug and fetch the detailed side effects from the FDA API. "
-        "Additionally, if the user uses alternative phrases or words similar to 'side effects' (e.g., 'adverse reactions', 'drug impact'), the tool will ensure that the FDA API is called to retrieve comprehensive information about the drug's side effects."
-        "ensure that the agent fetch information side effect from articles etc in the FDA "
-    )
+# Load and prepare the document dataset (this should be done once during app startup)
+pdf_path = r"D:\Mission\PIAIC\Quarter 4\projects\Multi_DOC_rag\transformer.pdf"
+Dataset_transformer = PyPDFLoader(pdf_path)
+pages = Dataset_transformer.load()
+pdf_text = " ".join(page.page_content for page in pages)
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=200,
+    separators=["\n\n", ".", " "]
+)
+texts = text_splitter.create_documents([pdf_text])
+
+# Configure the Qdrant vector store
+url = "https://2c198102-ae27-482e-8f0c-7e7aac93309d.europe-west3-0.gcp.cloud.qdrant.io:6333"
+api_key = "MJ4SW_YT6rAEGSMffQjYO17rth77dmR_l4wq2CjehmrF9v6S9MPbLQ"
+
+# Check Qdrant connectivity and initialize the vector store
+response = requests.get(f"{url}/collections", headers={"api-key": api_key})
+if response.status_code != 200:
+    raise Exception(f"Failed to connect to Qdrant: {response.status_code} - {response.text}")
+
+qdrant = QdrantVectorStore.from_documents(
+    texts,
+    embeddings,
+    url=url,
+    api_key=api_key,
+    collection_name="Multi_rag_app",
 )
 
-# List of tools for the agent
-tools = [pubmed_search_tool, fda_side_effects_tool]
 
-# Define the medical assistant prompt template
-medical_prompt_template = """
-You are a medical assistant AI. Your primary goal is to provide factual, concise, and respectful responses to healthcare-related questions. You are restricted to responding only to questions related to medical topics such as symptoms, treatments, causes of diseases, drugs, and healthcare advice. You will use PubMed to look up treatment options, causes of diseases, and the FDA API to look up drug side effects.
-
-Here are some guidelines:
-- Be informative: Provide factual medical information based on available knowledge.
-- Be concise: Keep your responses clear and to the point.
-- Be respectful: Treat users with courtesy and respect.
-- If the question is about symptoms, causes of diseases, or treatment options, call the PubMed API and provide detailed information.
-- For questions specifically about the causes of diseases, use the PubMed API to retrieve articles focused on the causes of the disease and provide detailed summaries.
-- If the question is about drug side effects, use the FDA API to fetch detailed side effects of the drug and provide a comprehensive list of adverse reactions. 
-
-
-When responding to queries about the causes of diseases (e.g., cancer, fever, diabetes), ensure that you:
-- Focus on the underlying causes of the disease.
-- Provide article summaries from PubMed that specifically discuss the causes of the disease.
-
-Please respond to the following query:
-{input}
-
-{agent_scratchpad}
-"""
-
-
-# Define the prompt with the required variables
-prompt = PromptTemplate(
-    template=medical_prompt_template,
-    input_variables=["input", "agent_scratchpad"],  # Include agent_scratchpad
-)
-
-# Create the agent and agent executor with correct argument order
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
-# Request model
+# Define the request model for querying the API
 class QueryRequest(BaseModel):
     question: str
 
-# Endpoint to ask a question to the Langchain agent
-@app.post("/ask")
-async def ask_question(query: QueryRequest):
-    user_input = query.question
 
-    # Invoke the agent with the user input
-    try:
-        response = agent_executor.invoke(
-            {"input": user_input},
-            config={"configurable": {"session_id": "test123"}},
-        )
-        return {"response": response}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+# Streaming response generator
+async def stream_summary(aggregated_content: str) -> AsyncGenerator[str, None]:
+    # Prepare the Gemini API request for summarization
+    messages = [
+        ("system", "You are a helpful assistant."),
+        ("human", f"Summarize this content: {aggregated_content[:1500]}")  # Limit content length for summarization
+    ]
 
-# Example root endpoint
-@app.get("/")
-async def root():
-    return {"message": "Welcome to the Medical Assistant API!"}
+    # Simulate the streaming response from Gemini
+    ai_msg = Gemini.invoke(messages)
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    # Simulating a stream of chunks by yielding parts of the content
+    summary = ai_msg.content
+    for i in range(0, len(summary), 100):  # Simulate streaming chunks of 100 characters
+        yield summary[i:i + 100]
+        await asyncio.sleep(0.1)  # Simulate network delay or processing delay
+
+
+@app.post("/search")
+async def search_and_summarize(request: QueryRequest):
+    """
+    Search for documents based on a question and summarize the results.
+    """
+    question = request.question
+    docs_ss = qdrant.similarity_search(question, k=5)
+
+    if not docs_ss:
+        raise HTTPException(status_code=404, detail="No similar documents found.")
+    
+    # Aggregate content from the top results
+    aggregated_content = " ".join([doc.page_content for doc in docs_ss])
+
+    # Return a streaming response
+    return StreamingResponse(stream_summary(aggregated_content), media_type="text/plain")
+
+
+# To run the FastAPI application, save this as `main.py` and run:
+# uvicorn main:app --reload
+
